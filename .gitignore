@@ -1,0 +1,21 @@
+# Python Virtual Environments & Cache
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local Environment Variables (Keep secrets safe later)
+.env
+
+# Java/Build folders (For when we do the frontend)
+target/
+build/
+.gradle/
+*.class
+
+# IDE Settings
+.vscode/
+
+# Temporary folders
+pip-tmp/
