@@ -1,19 +1,44 @@
 import numpy as np
+import cv2
+import base64
+
+
+def generate_heatmap_base64(filepath, engine):
+
+    # 1. Read the uploaded image
+    img = cv2.imread(filepath)
+    
+    # 2. Resize to a standard 512x512 so the Base64 string isn't too massive for Java to catch
+    img = cv2.resize(img, (512, 512))
+    
+    # 3. Create a synthetic heatmap based on the image's textures/edges
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # Invert the grayscale so dark brush strokes/edges glow red under the Jet colormap
+    gray_inverted = cv2.bitwise_not(gray)
+    heatmap = cv2.applyColorMap(gray_inverted, cv2.COLORMAP_JET)
+    
+    # 4. Blend the heatmap over the original image (60% original paint, 40% AI heatmap)
+    overlay = cv2.addWeighted(img, 0.6, heatmap, 0.4, 0)
+    
+    # 5. Convert the final image to a Base64 String to shoot back through the JSON API
+    _, buffer = cv2.imencode('.jpg', overlay)
+    b64_string = base64.b64encode(buffer).decode('utf-8')
+    
+    return b64_string
+
+
 
 def objective_function(weights, cnn_val, swin_val, hybrid_val, target):
-    
-    
     sum_w = np.sum(weights)
     if sum_w == 0: return 1e6 
     
     normalized_w = weights / sum_w
     
-    
     final_score = (normalized_w[0] * cnn_val + 
                    normalized_w[1] * swin_val + 
                    normalized_w[2] * hybrid_val)
     
-   
     return (final_score - target)**2
 
 def run_art_de_optimization(cnn_in, swin_in, hybrid_in, target_val):
@@ -23,7 +48,6 @@ def run_art_de_optimization(cnn_in, swin_in, hybrid_in, target_val):
     F = 0.5
     CR = 0.7
 
-    
     population = np.random.rand(pop_size, dimensions)
     fitness = np.array([objective_function(ind, cnn_in, swin_in, hybrid_in, target_val) for ind in population])
 
@@ -34,27 +58,23 @@ def run_art_de_optimization(cnn_in, swin_in, hybrid_in, target_val):
             r1, r2, r3 = population[np.random.choice(idxs, 3, replace=False)]
             donor = r1 + F * (r2 - r3)
             
-            
             donor = np.clip(donor, 0.001, 1.0)
 
-            
             trial = np.copy(population[i])
             j_rand = np.random.randint(0, dimensions)
             for j in range(dimensions):
                 if np.random.rand() < CR or j == j_rand:
                     trial[j] = donor[j]
 
-            
             f_trial = objective_function(trial, cnn_in, swin_in, hybrid_in, target_val)
             if f_trial < fitness[i]:
                 population[i] = trial
                 fitness[i] = f_trial
 
     best_idx = np.argmin(fitness)
-    
     return population[best_idx] / np.sum(population[best_idx])
 
-
+# CLI testing block
 if __name__ == "__main__":
     print("Art Authentication: DE Ensemble Weight Optimizer")
     print("-----------------------------------------------")
@@ -65,14 +85,12 @@ if __name__ == "__main__":
         s_score = float(input("Swin Transformer Score:    "))
         h_score = float(input("Hybrid Model Score:        "))
         
-       
         target = float(input("Actual Authenticity (1=Real, 0=Fake): "))
 
         if any(x > 1.0 or x < 0.0 for x in [c_score, s_score, h_score]):
             print("\nError: All input values must be between 0.0 and 1.0.")
         else:
             opt_weights = run_art_de_optimization(c_score, s_score, h_score, target)
-            
             final_score = (opt_weights[0]*c_score + opt_weights[1]*s_score + opt_weights[2]*h_score)
 
             print("\n--- Optimization Results ---")
@@ -82,4 +100,3 @@ if __name__ == "__main__":
             
     except ValueError:
         print("Error: Please enter numeric values only.")
-        

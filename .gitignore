@@ -1,21 +1,35 @@
-# Python Virtual Environments & Cache
+
+raw_authentic/
+raw_forgery/
+backend-flask/models/
+backend-flask/uploads/
+backend-flask/processed/
+
+
+webscrap.py
+cell4backup.txt
+*/cell4backup.txt
+
+
 venv/
+backend-flask/venv/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+pip-tmp/
 
-# Local Environment Variables (Keep secrets safe later)
+
 .env
 
-# Java/Build folders (For when we do the frontend)
+
 target/
+frontend-java/target/
 build/
 .gradle/
 *.class
 
-# IDE Settings
-.vscode/
 
-# Temporary folders
-pip-tmp/
+.vscode/
+.idea/
+.DS_Store
