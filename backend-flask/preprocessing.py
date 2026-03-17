@@ -5,7 +5,7 @@ import torch
 import torchvision.transforms.functional as TF
 from PIL import Image
 
-# Exact parameters from your Colab training script
+
 SCALES = [512, 256]
 TARGET_SIZE = 256
 STRIDE = 512

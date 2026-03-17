@@ -1,0 +1,560 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
+get_ipython().system('pip install opencv-python-headless tqdm scipy')
+
+
+# In[3]:
+
+
+import os
+import cv2
+import numpy as np
+import shutil
+import gc
+import concurrent.futures
+import multiprocessing
+from tqdm import tqdm
+from google.colab import drive
+from PIL import Image
+
+Image.MAX_IMAGE_PIXELS = None
+
+drive.mount('/content/drive')
+
+INPUT_FOLDERS = {
+    "authentic": "/content/drive/MyDrive/Art_Forgery_Project/raw_authentic",
+    "forgery": "/content/drive/MyDrive/Art_Forgery_Project/raw_forgery"
+}
+
+LOCAL_OUTPUT_DIR = "/content/local_dataset"
+DRIVE_ZIP_PATH = "/content/drive/MyDrive/Art_Forgery_Project/ArtDataset_Processed.zip"
+
+SCALES = [512, 256]
+TARGET_SIZE = 256
+STRIDE = 512
+
+def auto_canny(image, sigma=0.33):
+    median = np.median(image)
+    lower = int(max(0, (1.0 - sigma) * median))
+    upper = int(min(255, (1.0 + sigma) * median))
+    return cv2.Canny(image, lower, upper)
+
+def process_single_image(args):
+    img_path, base_name, out_folder = args
+    try:
+        pil_img = Image.open(img_path)
+    except Exception:
+        return
+
+    w, h = pil_img.size
+
+    for y in range(0, h - max(SCALES) + 1, STRIDE):
+        for x in range(0, w - max(SCALES) + 1, STRIDE):
+            for scale in SCALES:
+                box = (x, y, x + scale, y + scale)
+                patch_pil = pil_img.crop(box).convert('RGB')
+
+                patch_rgb = cv2.cvtColor(np.array(patch_pil), cv2.COLOR_RGB2BGR)
+
+                patch_gray = cv2.cvtColor(patch_rgb, cv2.COLOR_BGR2GRAY)
+                blurred = cv2.GaussianBlur(patch_gray, (5, 5), 0)
+                patch_edge = auto_canny(blurred)
+
+                if scale != TARGET_SIZE:
+                    patch_rgb = cv2.resize(patch_rgb, (TARGET_SIZE, TARGET_SIZE))
+                    patch_gray = cv2.resize(patch_gray, (TARGET_SIZE, TARGET_SIZE))
+                    patch_edge = cv2.resize(patch_edge, (TARGET_SIZE, TARGET_SIZE))
+
+                patch_id = f"{base_name}_y{y}_x{x}_scale{scale}"
+                cv2.imwrite(os.path.join(out_folder, f"{patch_id}_rgb.png"), patch_rgb)
+                cv2.imwrite(os.path.join(out_folder, f"{patch_id}_gray.png"), patch_gray)
+                cv2.imwrite(os.path.join(out_folder, f"{patch_id}_edge.png"), patch_edge)
+
+    del pil_img
+    gc.collect()
+
+NUM_CORES = multiprocessing.cpu_count()
+print(f"Firing up all {NUM_CORES} CPU Cores for parallel processing...")
+
+for label, input_path in INPUT_FOLDERS.items():
+    out_folder = os.path.join(LOCAL_OUTPUT_DIR, label)
+    os.makedirs(out_folder, exist_ok=True)
+
+    if not os.path.exists(input_path):
+        continue
+
+    images = [f for f in os.listdir(input_path) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.tif'))]
+
+    tasks = [(os.path.join(input_path, img_name), os.path.splitext(img_name)[0], out_folder) for img_name in images]
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=NUM_CORES) as executor:
+        list(tqdm(executor.map(process_single_image, tasks), total=len(tasks), desc=f"⚡ Chopping {label} in Parallel"))
+
+print("\nZipping dataset to Google Drive (This prevents Drive API freezing)...")
+shutil.make_archive("/content/ArtDataset_Processed", 'zip', LOCAL_OUTPUT_DIR)
+shutil.copy("/content/ArtDataset_Processed.zip", DRIVE_ZIP_PATH)
+print(f"Pipeline Complete! Massive dataset secured at {DRIVE_ZIP_PATH}")
+
+
+# In[ ]:
+
+
+import os
+import shutil
+import zipfile
+import torch
+import multiprocessing
+from torch.utils.data import Dataset, DataLoader
+import torchvision.transforms.functional as TF
+from PIL import Image
+import glob
+import random
+from google.colab import drive
+
+drive.mount('/content/drive', force_remount=True)
+
+drive_zip_path = '/content/drive/MyDrive/Art_Forgery_Project/ArtDataset_Processed.zip'
+local_extract_path = '/content/dataset_ready/'
+
+
+print("Clearing out the corrupted extraction folder...")
+shutil.rmtree(local_extract_path, ignore_errors=True)
+
+
+print(f"Starting a fresh, complete extraction from {drive_zip_path}...")
+with zipfile.ZipFile(drive_zip_path, 'r') as zip_ref:
+    zip_ref.extractall(local_extract_path)
+print("Extraction 100% complete!")
+
+class ArtForgeryDataset(Dataset):
+    def __init__(self, root_dir):
+        authentic_rgb = glob.glob(os.path.join(root_dir, 'authentic', '*_rgb.png'))
+        forgery_rgb = glob.glob(os.path.join(root_dir, 'forgery', '*_rgb.png'))
+
+        self.all_files = [(f, 0) for f in authentic_rgb] + [(f, 1) for f in forgery_rgb]
+
+    def __len__(self):
+        return len(self.all_files)
+
+    def __getitem__(self, idx):
+        rgb_path, label = self.all_files[idx]
+
+        gray_path = rgb_path.replace('_rgb.png', '_gray.png')
+        edge_path = rgb_path.replace('_rgb.png', '_edge.png')
+
+        img_rgb = Image.open(rgb_path).convert('RGB')
+        img_gray = Image.open(gray_path).convert('L')
+        img_edge = Image.open(edge_path).convert('L')
+
+        img_rgb = TF.resize(img_rgb, (224, 224))
+        img_gray = TF.resize(img_gray, (224, 224))
+        img_edge = TF.resize(img_edge, (224, 224))
+
+        if random.random() > 0.5:
+            img_rgb = TF.hflip(img_rgb)
+            img_gray = TF.hflip(img_gray)
+            img_edge = TF.hflip(img_edge)
+
+        img_rgb = TF.to_tensor(img_rgb)
+        img_gray = TF.to_tensor(img_gray)
+        img_edge = TF.to_tensor(img_edge)
+
+        img_rgb = TF.normalize(img_rgb, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        img_gray = TF.normalize(img_gray, [0.5], [0.5])
+        img_edge = TF.normalize(img_edge, [0.5], [0.5])
+
+        return img_rgb, img_gray, img_edge, torch.tensor(label, dtype=torch.long)
+
+
+BATCH_SIZE = 64
+NUM_CORES = multiprocessing.cpu_count()
+
+print(f"Firing up {NUM_CORES} CPU Cores for Data Pre-loading...")
+
+train_loader = DataLoader(
+    ArtForgeryDataset(local_extract_path), 
+    batch_size=BATCH_SIZE, 
+    shuffle=True,
+    num_workers=NUM_CORES, 
+    pin_memory=True,       
+    prefetch_factor=2       
+)
+
+print(f"Pristine Dataset Loaded! Total Batches: {len(train_loader)} (Batch Size: {BATCH_SIZE})")
+
+
+# In[ ]:
+
+
+import torch
+import torch.nn as nn
+from torchvision import models
+
+class Branch1_CNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.backbone = models.efficientnet_b5(weights=models.EfficientNet_B5_Weights.DEFAULT)
+        self.features_extractor = self.backbone.features
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Linear(2048, 2)
+
+    def forward(self, x):
+        fm = self.features_extractor(x)
+        pooled = self.pool(fm).flatten(1)
+        score = self.classifier(pooled)
+        return fm, score
+
+class Branch2_ViT(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.backbone = models.swin_t(weights=models.Swin_T_Weights.DEFAULT)
+        self.backbone.head = nn.Linear(self.backbone.head.in_features, 2)
+
+    def forward(self, x):
+        return self.backbone(x)
+
+class Branch3_Hybrid(nn.Module):
+    def __init__(self):
+        super().__init__()
+        encoder_layer = nn.TransformerEncoderLayer(d_model=2048, nhead=8, batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
+        self.classifier = nn.Linear(2048, 2)
+
+    def forward(self, cnn_feature_map):
+        B, C, H, W = cnn_feature_map.shape
+        x = cnn_feature_map.view(B, C, H * W).permute(0, 2, 1)
+        x = self.transformer(x)
+        x = x.mean(dim=1)
+        return self.classifier(x)
+
+class ArtForgeryEngine(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.cnn = Branch1_CNN()
+        self.vit = Branch2_ViT()
+        self.hybrid = Branch3_Hybrid()
+
+    def forward(self, rgb, gray, edge):
+
+        edge_3ch = edge.repeat(1, 3, 1, 1)
+
+        cnn_features, cnn_score = self.cnn(edge_3ch)
+        vit_score = self.vit(rgb)
+        hybrid_score = self.hybrid(cnn_features)
+
+        return cnn_score, vit_score, hybrid_score
+
+print("Loading Triple-Branch Architecture into L4 VRAM...")
+engine = ArtForgeryEngine().cuda()
+
+
+print("Engaging PyTorch 2.0 Compiler for Maximum L4 Acceleration...")
+torch.set_float32_matmul_precision('high') 
+engine = torch.compile(engine)
+
+print("Engine Fully Compiled and Ready to Dominate!")
+
+
+# In[ ]:
+
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.amp import GradScaler 
+
+criterion = nn.CrossEntropyLoss()
+
+
+optimizer = optim.AdamW([
+    {'params': engine.cnn.parameters(), 'lr': 1e-5},     
+    {'params': engine.vit.parameters(), 'lr': 1e-5},     
+    {'params': engine.hybrid.parameters(), 'lr': 5e-4}   
+], weight_decay=1e-4)
+
+
+scaler = GradScaler('cuda')
+
+
+epochs = 30
+best_loss = float('inf')
+patience = 5  
+patience_counter = 0
+
+
+save_path = '/content/drive/MyDrive/Art_Forgery_Project/ArtForgeryEngine_V2_Advanced.pth'
+
+print("Firing up Advanced Multi-Speed Training Loop with Early Stopping...")
+for epoch in range(epochs):
+    engine.train()
+    running_loss = 0.0
+
+    for i, (rgb, gray, edge, labels) in enumerate(train_loader):
+
+        rgb = rgb.cuda(non_blocking=True)
+        gray = gray.cuda(non_blocking=True)
+        edge = edge.cuda(non_blocking=True)
+        labels = labels.cuda(non_blocking=True)
+
+        optimizer.zero_grad(set_to_none=True)
+
+
+        with torch.autocast(device_type='cuda', dtype=torch.float16):
+            cnn_out, vit_out, hybrid_out = engine(rgb, gray, edge)
+
+            loss_cnn = criterion(cnn_out, labels)
+            loss_vit = criterion(vit_out, labels)
+            loss_hybrid = criterion(hybrid_out, labels)
+
+            total_loss = loss_cnn + loss_vit + loss_hybrid
+
+        scaler.scale(total_loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        running_loss += total_loss.item()
+
+        if i % 10 == 0:
+            print(f"Epoch [{epoch+1}/{epochs}], Batch [{i}/{len(train_loader)}], Loss: {total_loss.item():.4f}")
+
+
+    epoch_loss = running_loss / len(train_loader)
+    print(f"\nEpoch {epoch+1} Average Loss: {epoch_loss:.4f}")
+
+    if epoch_loss < best_loss:
+        print(f"New best loss! Saving V2 model to Google Drive...")
+        best_loss = epoch_loss
+        torch.save(engine.state_dict(), save_path)
+        patience_counter = 0 
+    else:
+        patience_counter += 1
+        print(f"Loss didn't drop. Patience: {patience_counter}/{patience}")
+
+    if patience_counter >= patience:
+        print(f"\nEARLY STOPPING TRIGGERED! The AI started memorizing.")
+        print(f"Halting at Epoch {epoch+1} to prevent overfitting. Your best weights are saved!")
+        break
+
+
+# In[ ]:
+
+
+import os
+import sys
+
+
+sys.stdout.flush()
+
+
+file_path = '/content/drive/MyDrive/Art_Forgery_Project/ArtForgeryEngine_V2_Advanced.pth'
+
+if os.path.exists(file_path):
+    size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    print(f"FILE SECURED ON SERVER!")
+    print(f"Exact Location: {file_path}")
+    print(f"File Size: {size_mb:.2f} MB")
+
+
+    print("Forcing Google Drive sync...")
+    from google.colab import drive
+    drive.flush_and_unmount()
+    print("SYNC COMPLETE! You can safely check the Google Drive website now.")
+else:
+    print("ERROR: File not found! Check your Google Drive mount.")
+
+
+# In[ ]:
+
+
+import numpy as np
+from scipy.optimize import differential_evolution
+import torch
+import torch.nn.functional as F
+from tqdm.notebook import tqdm
+
+def objective_function(weights, cnn_preds, vit_preds, hybrid_preds, true_labels):
+
+    sum_w = np.sum(weights)
+    if sum_w == 0: 
+        return 1.0 
+
+    w1, w2, w3 = weights / sum_w
+
+
+    blended = (w1 * cnn_preds) + (w2 * vit_preds) + (w3 * hybrid_preds)
+    final_preds = torch.argmax(blended, dim=1)
+
+    correct = (final_preds == true_labels).sum().item()
+    accuracy = correct / len(true_labels)
+
+
+    return -accuracy
+
+engine.eval()
+print("Gathering multi-modal predictions for Differential Evolution...")
+
+all_cnn, all_vit, all_hybrid, all_labels = [], [], [], []
+
+with torch.no_grad():
+
+    for rgb, gray, edge, labels in tqdm(train_loader, desc="Extracting Features"):
+
+
+        rgb = rgb.cuda(non_blocking=True)
+        gray = gray.cuda(non_blocking=True)
+        edge = edge.cuda(non_blocking=True)
+
+        labels = labels.cpu() 
+
+
+        with torch.autocast(device_type='cuda', dtype=torch.float16):
+            cnn_out, vit_out, hybrid_out = engine(rgb, gray, edge)
+
+        all_cnn.append(F.softmax(cnn_out, dim=1).cpu())
+        all_vit.append(F.softmax(vit_out, dim=1).cpu())
+        all_hybrid.append(F.softmax(hybrid_out, dim=1).cpu())
+        all_labels.append(labels)
+
+val_cnn = torch.cat(all_cnn)
+val_vit = torch.cat(all_vit)
+val_hybrid = torch.cat(all_hybrid)
+val_labels = torch.cat(all_labels)
+
+bounds = [(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)]
+
+print("Running Differential Evolution Optimizer...")
+result = differential_evolution(
+    objective_function, 
+    bounds, 
+    args=(val_cnn, val_vit, val_hybrid, val_labels),
+    strategy='best1bin', 
+    maxiter=50, 
+    popsize=15
+)
+
+
+best_weights = result.x / np.sum(result.x)
+
+print("\nOPTIMIZATION COMPLETE!")
+print("Copy and paste these exact numbers into your Flask model_inference.py:")
+print(f"w_cnn = {best_weights[0]:.3f}")
+print(f"w_vit = {best_weights[1]:.3f}")
+print(f"w_hybrid = {best_weights[2]:.3f}")
+
+
+# In[ ]:
+
+
+import torch
+import torch.nn.functional as F
+import cv2
+import numpy as np
+from PIL import Image
+import torchvision.transforms.functional as TF
+import random
+from google.colab import drive
+from tqdm import tqdm
+
+
+drive.mount('/content/drive', force_remount=True)
+Image.MAX_IMAGE_PIXELS = None  
+
+
+W_CNN = 0.029
+W_VIT = 0.876
+W_HYBRID = 0.095
+
+def auto_canny(image, sigma=0.33):
+    median = np.median(image)
+    lower = int(max(0, (1.0 - sigma) * median))
+    upper = int(min(255, (1.0 + sigma) * median))
+    return cv2.Canny(image, lower, upper)
+
+def predict_large_image(image_path, model, num_patches=64, extract_size=256): 
+    model.eval()
+
+    print(f" Forensic Scanning Initiated: {image_path.split('/')[-1]}")
+    try:
+        pil_img = Image.open(image_path).convert('RGB')
+    except Exception as e:
+        print(f" Error loading image. Check your Drive connection: {e}")
+        return
+
+    w, h = pil_img.size
+    print(f" Massive Canvas Detected: {w}x{h} pixels")
+    print(f" Extracting {num_patches} forensic patches...")
+
+    rgb_tensors, gray_tensors, edge_tensors = [], [], []
+
+
+    for _ in tqdm(range(num_patches), desc="Processing Patches"):
+
+        x = random.randint(0, w - extract_size)
+        y = random.randint(0, h - extract_size)
+
+        patch_pil = pil_img.crop((x, y, x + extract_size, y + extract_size))
+
+
+        cv_bgr = cv2.cvtColor(np.array(patch_pil), cv2.COLOR_RGB2BGR)
+        patch_gray = cv2.cvtColor(cv_bgr, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(patch_gray, (5, 5), 0)
+        patch_edge = auto_canny(blurred)
+
+
+        patch_pil_resized = patch_pil.resize((224, 224))
+        patch_gray_resized = cv2.resize(patch_gray, (224, 224))
+        patch_edge_resized = cv2.resize(patch_edge, (224, 224))
+
+
+        t_rgb = TF.to_tensor(patch_pil_resized) 
+        t_gray = TF.to_tensor(patch_gray_resized)
+        t_edge = TF.to_tensor(patch_edge_resized)
+
+
+        t_rgb = TF.normalize(t_rgb, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        t_gray = TF.normalize(t_gray, [0.5], [0.5])
+        t_edge = TF.normalize(t_edge, [0.5], [0.5])
+
+        rgb_tensors.append(t_rgb)
+        gray_tensors.append(t_gray)
+        edge_tensors.append(t_edge)
+
+
+    batch_rgb = torch.stack(rgb_tensors).cuda()
+    batch_gray = torch.stack(gray_tensors).cuda()
+    batch_edge = torch.stack(edge_tensors).cuda()
+
+    print(" Passing batch to Triple-Branch Engine...")
+    with torch.no_grad():
+        with torch.autocast(device_type='cuda', dtype=torch.float16):
+            cnn_out, vit_out, hybrid_out = model(batch_rgb, batch_gray, batch_edge)
+
+        cnn_prob = F.softmax(cnn_out, dim=1)
+        vit_prob = F.softmax(vit_out, dim=1)
+        hybrid_prob = F.softmax(hybrid_out, dim=1)
+
+
+        blended_scores = (W_CNN * cnn_prob) + (W_VIT * vit_prob) + (W_HYBRID * hybrid_prob)
+
+
+        final_score = torch.mean(blended_scores, dim=0)
+
+        final_prediction = torch.argmax(final_score).item()
+
+        total_weight = W_CNN + W_VIT + W_HYBRID
+        confidence = (torch.max(final_score).item() / total_weight) * 100
+
+        labels = {0: "Authentic Masterpiece", 1: "Confirmed Forgery"}
+        print("\n=======================================")
+        print(f" FINAL VERDICT: {labels[final_prediction]}")
+        print(f" Confidence Score: {confidence:.2f}%")
+        print("=======================================\n")
+
+
+test_image = '/content/drive/MyDrive/Art_Forgery_Project/raw_forgery/Der_ungläubige_Thomas_-_Michelangelo_Merisi,_named_Caravaggio.jpg'
+predict_large_image(test_image, engine)
+
