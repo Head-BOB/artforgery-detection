@@ -14,7 +14,6 @@ def process_image():
         print("Error: Could not read the image.")
         return
 
-    # uploads folder inside backend-flask
     upload_folder = os.path.join(os.path.dirname(__file__), "uploads")
 
     base_filename = os.path.basename(image_path)
@@ -31,7 +30,7 @@ def process_image():
     edge_filename = os.path.join(upload_folder, f"{file_name}_edges{file_extension}")
     cv2.imwrite(edge_filename, edge_img)
 
-    print("\n✅ Images saved successfully in the 'uploads' folder:")
+    print("\nImages saved successfully in the 'uploads' folder:")
     print(rgb_filename)
     print(gray_filename)
     print(edge_filename)
